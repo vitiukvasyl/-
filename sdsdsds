@@ -1,0 +1,121 @@
+import asyncio
+import aioschedule as schedule
+from telegram import Update
+from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, CallbackContext, ConversationHandler, filters
+import nest_asyncio
+
+nest_asyncio.apply()
+
+POST, SCHEDULE = range(2)  # States for conversation handler
+chat_id = None
+post_message = None
+photo_file_id = None
+context = None
+
+
+async def start_command(update: Update, context: CallbackContext):
+    await update.message.reply_text(
+        "Привет! Я бот. Вот что я могу делать:\n"
+        "/setchat [ID чата] - установить ID чата для отправки сообщений.\n"
+        "/setpost - подготовить следующее сообщение или фото для отправки.\n"
+        "/schedule - настроить планирование публикаций.\n"
+        "/publish - опубликовать сохранённое сообщение и фото в установленный чат."
+    )
+
+
+async def set_chat(update: Update, context: CallbackContext):
+    global chat_id
+    chat_id = update.message.text.split()[1]
+    await update.message.reply_text(f"ID чата установлен на {chat_id}.")
+
+
+async def set_post(update: Update, context: CallbackContext):
+    global post_message, photo_file_id
+    post_message = None
+    photo_file_id = None
+    await update.message.reply_text("Отправьте мне текст и/или фото.")
+    return POST
+
+
+async def receive_post(update: Update, context: CallbackContext):
+    global post_message, photo_file_id
+    if update.message.text:
+        post_message = update.message.text
+    if update.message.photo:
+        photo_file_id = update.message.photo[-1].file_id
+    await update.message.reply_text("Сообщение и/или фотография сохранены для отправки.")
+    return ConversationHandler.END
+
+
+async def schedule_posts(update: Update, context: CallbackContext):
+    await update.message.reply_text("Введите интервал и продолжительность (например, '1/60h 1w').")
+    return SCHEDULE
+
+
+async def set_schedule(update: Update, context: CallbackContext):
+    try:
+        interval, duration = update.message.text.split()
+        schedule_campaign(interval, duration)
+        await update.message.reply_text(f"Планирование установлено: публикации каждые {interval}, продолжительность {duration}.")
+    except ValueError as e:
+        await update.message.reply_text(str(e))
+    return ConversationHandler.END
+
+def schedule_campaign(interval, duration):
+    schedule.clear()
+    interval_minutes = parse_interval(interval)
+    duration_minutes = parse_duration(duration)
+    schedule.every(interval_minutes).minutes.do(publish_scheduled_post_task)
+    stop_time = duration_minutes * 60
+    asyncio.get_event_loop().call_later(stop_time, schedule.clear)
+
+
+def publish_scheduled_post_task():
+    asyncio.create_task(publish_scheduled_post())
+
+
+async def publish_scheduled_post(update=None, context=None):
+    global chat_id, post_message, photo_file_id
+    ctx = context if context else globals().get('context')
+    if chat_id:
+        if post_message:
+            await ctx.bot.send_message(chat_id=chat_id, text=post_message)
+        if photo_file_id:
+            await ctx.bot.send_photo(chat_id=chat_id, photo=photo_file_id)
+        print("Сообщение и/или фотография отправлены.")
+
+
+async def cancel(update: Update, context: CallbackContext):
+    await update.message.reply_text('Отменено.')
+    return ConversationHandler.END
+
+
+async def run_scheduler():
+    while True:
+        await schedule.run_pending()
+        await asyncio.sleep(1)
+
+
+async def main():
+    global context
+    application = ApplicationBuilder().token('6419377278:AAGMySDOdvYnPJTRg5JSW7XMPvlcAfrXd8U').build()
+    context = application.bot
+    conv_handler = ConversationHandler(
+        entry_points=[CommandHandler('setpost', set_post), CommandHandler('schedule', schedule_posts)],
+        states={
+            POST: [MessageHandler(filters.TEXT | filters.PHOTO, receive_post)],
+            SCHEDULE: [MessageHandler(filters.TEXT, set_schedule)]
+        },
+        fallbacks=[CommandHandler('cancel', cancel)]
+    )
+
+    application.add_handler(CommandHandler("start", start_command))
+    application.add_handler(CommandHandler("setchat", set_chat))
+    application.add_handler(conv_handler)
+    application.add_handler(CommandHandler("publish", publish_scheduled_post))
+
+    asyncio.create_task(run_scheduler())
+    await application.run_polling()
+
+if __name__ == '__main__':
+    asyncio.run(main())
